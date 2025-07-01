@@ -1,0 +1,190 @@
+# Name of the GitHub Actions workflow
+name: ETL CI/CD Pipeline
+
+# Defines the events that trigger the workflow
+on:
+  push:
+    branches: [main] # Runs on pushes to the main branch (includes merges)
+  pull_request:
+    branches: [main] # Runs on pull requests targeting the main branch
+
+# Defines the jobs to be executed
+jobs:
+  test:
+    runs-on: ubuntu-latest # Specifies the runner environment (latest Ubuntu)
+    steps:
+    # Step 1: Checks out the repository code
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    # Step 2: Sets up Python environment
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11' # Specifies Python version to use
+        
+    # Step 3: Cache dependencies for faster builds
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    # Step 4: Installs dependencies
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    # Step 5: Add glue_jobs folder to PYTHONPATH
+    - name: Set PYTHONPATH
+      run: echo "PYTHONPATH=$PYTHONPATH:$(pwd)/glue_jobs" >> $GITHUB_ENV
+      
+    # Step 6: Runs unit tests
+    - name: Run tests
+      run: pytest tests/ -v --tb=short
+      
+    # Step 7: Run linting (optional but recommended)
+    - name: Run code quality checks
+      run: |
+        pip install flake8
+        flake8 glue_jobs/ tests/ --max-line-length=120 --ignore=E501,W503
+      continue-on-error: true # Don't fail the pipeline for linting issues
+
+  # Job for deploying AWS Step Function and Glue jobs
+  deploy:
+    # This job runs only on pushes to the main branch (includes merges from dev)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: test # This job depends on the completion of the 'test' job
+    environment: production # Optional: adds protection rules
+    
+    steps:
+    # Step 1: Checks out the repository code
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    # Step 2: Configure AWS credentials
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+        
+    # Step 3: Verify AWS connection
+    - name: Verify AWS credentials
+      run: aws sts get-caller-identity
+      
+    # Step 4: Upload Glue job scripts to S3
+    - name: Upload Glue job scripts to S3
+      run: |
+        echo "Uploading Glue job scripts to S3..."
+        aws s3 cp glue_jobs/products-glue-job.py s3://aws-glue-assets-814724283777-us-east-1/scripts/products-glue-job.py
+        aws s3 cp glue_jobs/orders-glue-job.py s3://aws-glue-assets-814724283777-us-east-1/scripts/orders-glue-job.py
+        aws s3 cp glue_jobs/order-items-glue-job.py s3://aws-glue-assets-814724283777-us-east-1/scripts/order-items-glue-job.py
+        aws s3 cp glue_jobs/xlsx_to_csv.py s3://aws-glue-assets-814724283777-us-east-1/scripts/xlsx_to_csv.py
+        echo "All scripts uploaded successfully"
+        
+    # Step 5: Update Glue jobs with error handling
+    - name: Deploy or update Glue jobs
+      run: |
+        echo "Updating Glue jobs..."
+        
+        # Function to update or create Glue job
+        update_glue_job() {
+          local job_name=$1
+          local script_location=$2
+          local command_type=$3
+          local glue_version=$4
+          local python_version=$5
+          
+          echo "Processing job: $job_name"
+          
+          if aws glue get-job --job-name "$job_name" >/dev/null 2>&1; then
+            echo "Updating existing job: $job_name"
+            if [ "$command_type" = "pythonshell" ]; then
+              aws glue update-job --job-name "$job_name" \
+                --job-update "Role=arn:aws:iam::814724283777:role/GlueJobRole,Command={Name=$command_type,ScriptLocation=$script_location,PythonVersion=$python_version},GlueVersion=$glue_version"
+            else
+              aws glue update-job --job-name "$job_name" \
+                --job-update "Role=arn:aws:iam::814724283777:role/GlueJobRole,Command={Name=$command_type,ScriptLocation=$script_location},GlueVersion=$glue_version,WorkerType=G.1X,NumberOfWorkers=2"
+            fi
+          else
+            echo "Job $job_name does not exist. Please create it manually first or add creation logic."
+            exit 1
+          fi
+          echo "Job $job_name updated successfully"
+        }
+        
+        # Update all jobs with correct names
+        update_glue_job "products-glue-job" "s3://aws-glue-assets-814724283777-us-east-1/scripts/products-glue-job.py" "glueetl" "5.0" ""
+        update_glue_job "orders-glue-job" "s3://aws-glue-assets-814724283777-us-east-1/scripts/orders-glue-job.py" "glueetl" "5.0" ""
+        update_glue_job "order-items-glue-job" "s3://aws-glue-assets-814724283777-us-east-1/scripts/order-items-glue-job.py" "glueetl" "5.0" ""
+        update_glue_job "xlsx_to_csv" "s3://aws-glue-assets-814724283777-us-east-1/scripts/xlsx_to_csv.py" "pythonshell" "4.0" "3.9"
+        
+        echo "All Glue jobs updated successfully"
+        
+    # Step 6: Validate Step Function definition
+    - name: Validate Step Function definition
+      run: |
+        echo "Validating Step Function definition..."
+        if [ ! -f "stepfunction.json" ]; then
+          echo "stepfunction.json not found"
+          exit 1
+        fi
+        
+        # Basic JSON validation
+        python -m json.tool stepfunction.json > /dev/null
+        echo "Step Function definition is valid JSON"
+        
+    # Step 7: Deploy or update AWS Step Function state machine
+    - name: Deploy State Machine
+      run: |
+        echo "Updating Step Function state machine..."
+        aws stepfunctions update-state-machine \
+          --state-machine-arn arn:aws:states:us-east-1:814724283777:stateMachine:Lakehouse \
+          --definition file://stepfunction.json
+        echo "Step Function updated successfully"
+        
+    # Step 8: Post-deployment verification
+    - name: Verify deployment
+      run: |
+        echo "Verifying deployment..."
+        
+        # Check if all Glue jobs exist and are updated
+        for job in "products-glue-job" "orders-glue-job" "order-items-glue-job" "xlsx_to_csv"; do
+          if aws glue get-job --job-name "$job" >/dev/null 2>&1; then
+            echo "Job $job exists and is accessible"
+          else
+            echo "Job $job verification failed"
+            exit 1
+          fi
+        done
+        
+        # Check Step Function
+        if aws stepfunctions describe-state-machine --state-machine-arn arn:aws:states:us-east-1:814724283777:stateMachine:Lakehouse >/dev/null 2>&1; then
+          echo "Step Function is accessible"
+        else
+          echo "Step Function verification failed"
+          exit 1
+        fi
+        
+        echo "Deployment verification completed successfully"
+
+  # Optional: Notification job
+  notify:
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: [test, deploy]
+    steps:
+    - name: Notify deployment status
+      run: |
+        if [ "${{ needs.deploy.result }}" = "success" ]; then
+          echo "Deployment to production completed successfully"
+        else
+          echo "Deployment failed. Please check the logs."
+          exit 1
+        fi
