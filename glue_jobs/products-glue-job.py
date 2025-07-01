@@ -274,7 +274,27 @@ class ProductsETL:
         except Exception as e:
             logger.error(f"Error in Delta table upsert: {str(e)}")
             raise
-    
+    def optimize_delta_table(self):
+        """Optimize Delta table for better performance"""
+        try:
+            logger.info("Starting Delta table optimization")
+            
+            # Run OPTIMIZE command
+            self.spark.sql(f"""
+                OPTIMIZE delta.`{self.processed_path}`
+            """)
+            
+            # Run VACUUM to clean up old files (7 days retention)
+            self.spark.sql(f"""
+                VACUUM delta.`{self.processed_path}` RETAIN 168 HOURS
+            """)
+            
+            logger.info("Delta table optimization completed")
+            
+        except Exception as e:
+            logger.error(f"Error optimizing Delta table: {str(e)}")
+            # Don't fail the job for optimization errors
+        
 
 def main():
     """Main function to run the Glue job"""
