@@ -364,6 +364,89 @@ class OrdersETL:
             logger.error(f"Error quarantining invalid records: {str(e)}")
             self.publish_metric("QuarantineErrors", 1)
 
+    
+    def upsert_to_delta_table(self, df_cleaned):
+        """Enhanced upsert with retry logic and performance optimization"""
+        try:
+            logger.info("Starting Delta table upsert operation")
+            
+            if df_cleaned.count() == 0:
+                logger.info("No records to upsert")
+                return
+            
+            # Deduplicate within current batch
+            window_spec = Window.partitionBy("order_id").orderBy(col("ingestion_timestamp").desc())
+            df_deduped = df_cleaned.withColumn("row_num", row_number().over(window_spec)) \
+                .filter(col("row_num") == 1) \
+                .drop("row_num")
+            
+            # Repartition by date for better write performance
+            df_deduped = df_deduped.repartition("date")
+            
+            logger.info(f"Records after deduplication: {df_deduped.count()}")
+            
+            # Retry logic for Delta operations
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if DeltaTable.isDeltaTable(self.spark, self.processed_path):
+                        logger.info(f"Delta table exists, performing merge operation (attempt {attempt + 1})")
+                        
+                        delta_table = DeltaTable.forPath(self.spark, self.processed_path)
+                        
+                        # Enhanced merge with conflict resolution
+                        merge_condition = "target.order_id = source.order_id"
+                        
+                        delta_table.alias("target").merge(
+                            df_deduped.alias("source"),
+                            merge_condition
+                        ).whenMatchedUpdate(
+                            condition="source.ingestion_timestamp > target.ingestion_timestamp",
+                            set={
+                                "order_num": "source.order_num",
+                                "user_id": "source.user_id",
+                                "order_timestamp": "source.order_timestamp",
+                                "total_amount": "source.total_amount",
+                                "date": "source.date",
+                                "ingestion_timestamp": "source.ingestion_timestamp",
+                                "source_file": "source.source_file"
+                            }
+                        ).whenNotMatchedInsertAll().execute()
+                        
+                        logger.info("Merge operation completed successfully")
+                        
+                    else:
+                        logger.info(f"Creating new partitioned Delta table (attempt {attempt + 1})")
+                        
+                        df_deduped.write.format("delta") \
+                            .mode("overwrite") \
+                            .partitionBy("date") \
+                            .option("mergeSchema", "true") \
+                            .option("delta.autoOptimize.optimizeWrite", "true") \
+                            .option("delta.autoOptimize.autoCompact", "true") \
+                            .option("delta.deletedFileRetentionDuration", "interval 7 days") \
+                            .save(self.processed_path)
+                        
+                        logger.info("New partitioned Delta table created successfully")
+                    
+                    # If we get here, operation succeeded
+                    self.publish_metric("UpsertSuccess", 1)
+                    break
+                    
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise e
+                    logger.warning(f"Attempt {attempt + 1} failed, retrying: {str(e)}")
+                    import time
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
+            # Optimize Delta table
+            self.optimize_delta_table(df_deduped)
+            
+        except Exception as e:
+            logger.error(f"Error in Delta table upsert: {str(e)}")
+            self.publish_metric("UpsertErrors", 1)
+            raise
 
 
 def main():
