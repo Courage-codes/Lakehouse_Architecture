@@ -558,7 +558,93 @@ class OrdersETL:
             self.publish_metric("CatalogUpdateErrors", 1)
             # Don't raise the exception - let the job continue even if catalog update fails
             logger.warning("Continuing job execution despite catalog update failure")
+
     
+    def publish_metric(self, metric_name, value):
+        """Publish custom metrics to CloudWatch"""
+        try:
+            self.cloudwatch.put_metric_data(
+                Namespace='GlueJobs/OrdersETL',
+                MetricData=[
+                    {
+                        'MetricName': metric_name,
+                        'Value': value,
+                        'Unit': 'Count',
+                        'Dimensions': [
+                            {
+                                'Name': 'JobName',
+                                'Value': self.job_name
+                            }
+                        ]
+                    }
+                ]
+            )
+        except Exception as e:
+            logger.warning(f"Failed to publish metric {metric_name}: {str(e)}")
+    
+    def get_processing_stats(self):
+        """Get comprehensive processing statistics"""
+        try:
+            delta_table = DeltaTable.forPath(self.spark, self.processed_path)
+            df = delta_table.toDF()
+            
+            # Basic stats
+            total_records = df.count()
+            
+            # Date range stats
+            date_stats = df.agg(
+                min("date").alias("min_date"),
+                max("date").alias("max_date"),
+                min("order_timestamp").alias("min_timestamp"),
+                max("order_timestamp").alias("max_timestamp"),
+                max("ingestion_timestamp").alias("last_ingestion"),
+                countDistinct("user_id").alias("unique_users")
+            ).collect()[0]
+            
+            # Amount stats
+            amount_stats = df.agg(
+                sum("total_amount").alias("total_revenue"),
+                avg("total_amount").alias("avg_order_value"),
+                min("total_amount").alias("min_amount"),
+                max("total_amount").alias("max_amount")
+            ).collect()[0]
+            
+            # Partition stats
+            partition_stats = df.groupBy("date").count().orderBy("date").collect()
+            
+            stats = {
+                "total_records": total_records,
+                "unique_users": date_stats['unique_users'],
+                "date_range": {
+                    "min_date": str(date_stats['min_date']),
+                    "max_date": str(date_stats['max_date']),
+                    "min_timestamp": str(date_stats['min_timestamp']),
+                    "max_timestamp": str(date_stats['max_timestamp'])
+                },
+                "revenue_metrics": {
+                    "total_revenue": float(amount_stats['total_revenue']) if amount_stats['total_revenue'] is not None else 0,
+                    "avg_order_value": float(amount_stats['avg_order_value']) if amount_stats['avg_order_value'] is not None else 0,
+                    "min_amount": float(amount_stats['min_amount']) if amount_stats['min_amount'] is not None else 0,
+                    "max_amount": float(amount_stats['max_amount']) if amount_stats['max_amount'] is not None else 0
+                },
+                "partition_counts": {str(row['date']): row['count'] for row in partition_stats},
+                "last_ingestion": str(date_stats['last_ingestion']),
+                "table_location": self.processed_path
+            }
+            
+            # Publish key metrics
+            self.publish_metric("TotalRecords", total_records)
+            self.publish_metric("UniqueUsers", date_stats['unique_users'])
+            self.publish_metric("TotalRevenue", float(amount_stats['total_revenue']) if amount_stats['total_revenue'] is not None else 0)
+            
+            logger.info(f"Processing stats: {stats}")
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error getting processing stats: {str(e)}")
+            return {}
+    
+
 
 def main():
     """Main function with enhanced parameter handling"""
