@@ -448,6 +448,38 @@ class OrdersETL:
             self.publish_metric("UpsertErrors", 1)
             raise
 
+    def optimize_delta_table(self, df_processed):
+        """Enhanced Delta table optimization"""
+        try:
+            logger.info("Starting Delta table optimization")
+            
+            # Get unique partition values
+            partitions = df_processed.select("date").distinct().collect()
+            
+            for row in partitions:
+                partition_date = row['date']
+                logger.info(f"Optimizing partition: date={partition_date}")
+                
+                # Optimize with Z-ordering
+                self.spark.sql(f"""
+                    OPTIMIZE delta.`{self.processed_path}`
+                    WHERE date = '{partition_date}'
+                    ZORDER BY (user_id, order_timestamp)
+                """)
+            
+            # Vacuum old files (configurable retention)
+            vacuum_hours = 168  # 7 days
+            self.spark.sql(f"""
+                VACUUM delta.`{self.processed_path}` RETAIN {vacuum_hours} HOURS
+            """)
+            
+            logger.info("Delta table optimization completed")
+            self.publish_metric("OptimizationSuccess", 1)
+            
+        except Exception as e:
+            logger.error(f"Error optimizing Delta table: {str(e)}")
+            self.publish_metric("OptimizationErrors", 1)
+
 
 def main():
     """Main function with enhanced parameter handling"""
