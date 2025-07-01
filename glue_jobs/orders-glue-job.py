@@ -59,6 +59,43 @@ class OrdersETL:
         self.cloudwatch = boto3.client('cloudwatch')
         self.s3_client = boto3.client('s3')
 
+        
+    def read_raw_data(self, file_path):
+        """Read CSV data from S3 with enforced schema"""
+        try:
+            logger.info(f"Reading raw data from: {file_path}")
+            
+            # Read CSV with explicit schema for better error handling
+            df_raw = self.spark.read.format("csv") \
+                .option("header", "true") \
+                .option("timestampFormat", "yyyy-MM-dd HH:mm:ss") \
+                .option("dateFormat", "yyyy-MM-dd") \
+                .option("mode", "PERMISSIVE") \
+                .option("columnNameOfCorruptRecord", "_corrupt_record") \
+                .schema(self.schema) \
+                .load(file_path)
+            
+            # Add _corrupt_record column if it doesn't exist
+            if "_corrupt_record" not in df_raw.columns:
+                df_raw = df_raw.withColumn("_corrupt_record", lit(None).cast(StringType()))
+            
+            # Check for corrupt records
+            corrupt_count = df_raw.filter(col("_corrupt_record").isNotNull()).count()
+            if corrupt_count > 0:
+                logger.warning(f"Found {corrupt_count} corrupt records")
+                self.publish_metric("CorruptRecords", corrupt_count)
+            
+            total_count = df_raw.count()
+            logger.info(f"Raw data read successfully. Row count: {total_count}")
+            self.publish_metric("RawRecordsRead", total_count)
+            
+            return df_raw
+            
+        except Exception as e:
+            logger.error(f"Error reading raw data: {str(e)}")
+            self.publish_metric("ReadErrors", 1)
+            raise
+
 
 
 def main():
