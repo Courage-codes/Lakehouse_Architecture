@@ -58,7 +58,6 @@ class OrdersETL:
         # Initialize CloudWatch client for metrics
         self.cloudwatch = boto3.client('cloudwatch')
         self.s3_client = boto3.client('s3')
-
         
     def read_raw_data(self, file_path):
         """Read CSV data from S3 with enforced schema"""
@@ -250,37 +249,37 @@ class OrdersETL:
         except Exception as e:
             logger.error(f"Error listing raw files: {str(e)}")
             return []
-
-        def move_file_to_archive(self, file_path):
-            """Move processed file from raw zone to archive zone"""
-            try:
-                # Extract bucket and key from S3 path
-                source_parts = file_path.replace('s3://', '').split('/', 1)
-                bucket_name = source_parts[0]
-                source_key = source_parts[1]
-                
-                # Create archive key
-                file_name = source_key.split('/')[-1]
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                archive_key = f"archived/orders/{timestamp}_{file_name}"
-                
-                # Copy file to archive
-                copy_source = {'Bucket': bucket_name, 'Key': source_key}
-                self.s3_client.copy_object(
-                    CopySource=copy_source,
-                    Bucket=bucket_name,
-                    Key=archive_key
-                )
-                
-                # Delete original file
-                self.s3_client.delete_object(Bucket=bucket_name, Key=source_key)
-                
-                logger.info(f"File moved from {file_path} to s3://{bucket_name}/{archive_key}")
-                return f"s3://{bucket_name}/{archive_key}"
-                
-            except Exception as e:
-                logger.error(f"Error moving file to archive: {str(e)}")
-                raise
+    
+    def move_file_to_archive(self, file_path):
+        """Move processed file from raw zone to archive zone"""
+        try:
+            # Extract bucket and key from S3 path
+            source_parts = file_path.replace('s3://', '').split('/', 1)
+            bucket_name = source_parts[0]
+            source_key = source_parts[1]
+            
+            # Create archive key
+            file_name = source_key.split('/')[-1]
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            archive_key = f"archived/orders/{timestamp}_{file_name}"
+            
+            # Copy file to archive
+            copy_source = {'Bucket': bucket_name, 'Key': source_key}
+            self.s3_client.copy_object(
+                CopySource=copy_source,
+                Bucket=bucket_name,
+                Key=archive_key
+            )
+            
+            # Delete original file
+            self.s3_client.delete_object(Bucket=bucket_name, Key=source_key)
+            
+            logger.info(f"File moved from {file_path} to s3://{bucket_name}/{archive_key}")
+            return f"s3://{bucket_name}/{archive_key}"
+            
+        except Exception as e:
+            logger.error(f"Error moving file to archive: {str(e)}")
+            raise
     
     def move_file_to_rejected(self, file_path, error_reason):
         """Move failed file from raw zone to rejected zone"""
@@ -363,7 +362,6 @@ class OrdersETL:
         except Exception as e:
             logger.error(f"Error quarantining invalid records: {str(e)}")
             self.publish_metric("QuarantineErrors", 1)
-
     
     def upsert_to_delta_table(self, df_cleaned):
         """Enhanced upsert with retry logic and performance optimization"""
@@ -447,7 +445,7 @@ class OrdersETL:
             logger.error(f"Error in Delta table upsert: {str(e)}")
             self.publish_metric("UpsertErrors", 1)
             raise
-
+    
     def optimize_delta_table(self, df_processed):
         """Enhanced Delta table optimization"""
         try:
@@ -479,7 +477,7 @@ class OrdersETL:
         except Exception as e:
             logger.error(f"Error optimizing Delta table: {str(e)}")
             self.publish_metric("OptimizationErrors", 1)
-
+   
     def update_glue_catalog(self):
         """Update AWS Glue Data Catalog with error handling"""
         try:
@@ -558,7 +556,6 @@ class OrdersETL:
             self.publish_metric("CatalogUpdateErrors", 1)
             # Don't raise the exception - let the job continue even if catalog update fails
             logger.warning("Continuing job execution despite catalog update failure")
-
     
     def publish_metric(self, metric_name, value):
         """Publish custom metrics to CloudWatch"""
@@ -644,7 +641,145 @@ class OrdersETL:
             logger.error(f"Error getting processing stats: {str(e)}")
             return {}
     
+    def run_etl(self):
+        """Main ETL orchestration with mode support and automatic file processing"""
+        try:
+            logger.info(f"Starting Orders ETL job: {self.job_name} (mode: {self.mode})")
+            
+            # Get all CSV files from raw zone
+            raw_files = self.list_raw_files()
+            
+            if not raw_files:
+                logger.info("No CSV files found in raw zone")
+                return {"message": "No files to process", "mode": self.mode, "files_processed": 0}
+            
+            processed_files = []
+            failed_files = []
+            total_valid_records = 0
+            
+            # Process each file individually
+            for file_path in raw_files:
+                try:
+                    logger.info(f"Processing file: {file_path}")
+                    
+                    # Read raw data for this file
+                    df_raw = self.read_raw_data(file_path)
+                    
+                    # Validate and clean data for this file
+                    df_cleaned = self.validate_and_clean_data(df_raw, file_path)
+                    
+                    if self.mode == "validate_only":
+                        # Move to archive even in validate-only mode if validation passes
+                        archived_path = self.move_file_to_archive(file_path)
+                        processed_files.append({
+                            "original": file_path,
+                            "archived": archived_path,
+                            "status": "validated"
+                        })
+                        continue
+                    
+                    if df_cleaned.count() == 0:
+                        logger.warning(f"No valid records in file: {file_path}")
+                        # Move to rejected zone due to no valid records
+                        rejected_path = self.move_file_to_rejected(file_path, "No valid records after validation")
+                        failed_files.append({
+                            "original": file_path,
+                            "rejected": rejected_path,
+                            "reason": "No valid records"
+                        })
+                        continue
+                    
+                    # Upsert to Delta table
+                    self.upsert_to_delta_table(df_cleaned)
+                    total_valid_records += df_cleaned.count()
+                    
+                    # Move successfully processed file to archive
+                    archived_path = self.move_file_to_archive(file_path)
+                    processed_files.append({
+                        "original": file_path,
+                        "archived": archived_path,
+                        "status": "processed",
+                        "records": df_cleaned.count()
+                    })
+                    
+                    logger.info(f"Successfully processed file: {file_path}")
+                    
+                except Exception as file_error:
+                    logger.error(f"Failed to process file {file_path}: {str(file_error)}")
+                    try:
+                        # Move failed file to rejected zone
+                        rejected_path = self.move_file_to_rejected(file_path, str(file_error))
+                        failed_files.append({
+                            "original": file_path,
+                            "rejected": rejected_path,
+                            "reason": str(file_error)
+                        })
+                    except Exception as move_error:
+                        logger.error(f"Failed to move file to rejected zone: {str(move_error)}")
+                        failed_files.append({
+                            "original": file_path,
+                            "rejected": None,
+                            "reason": f"Processing: {str(file_error)}, Move: {str(move_error)}"
+                        })
+            
+            # Update Glue Catalog only if we have processed files and not in upsert_only mode
+            if processed_files and self.mode != "upsert_only":
+                self.update_glue_catalog()
+            
+            # Get final stats
+            stats = {}
+            if total_valid_records > 0:
+                stats = self.get_processing_stats()
+            
+            # Add processing summary
+            stats.update({
+                "mode": self.mode,
+                "files_processed": len(processed_files),
+                "files_failed": len(failed_files),
+                "total_files": len(raw_files),
+                "total_valid_records": total_valid_records,
+                "processed_files": processed_files,
+                "failed_files": failed_files
+            })
+            
+            logger.info("Orders ETL job completed")
+            logger.info(f"Files processed: {len(processed_files)}, Files failed: {len(failed_files)}")
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"ETL job failed: {str(e)}")
+            self.publish_metric("JobFailures", 1)
+            raise
 
+def get_job_parameters():
+    """Get job parameters with proper handling of optional arguments"""
+    # Define required parameters
+    required_args = [
+        'JOB_NAME',
+        'raw_bucket',
+        'processed_bucket',
+        'database_name',
+        'table_name'
+    ]
+    
+    # Get required parameters first
+    args = getResolvedOptions(sys.argv, required_args)
+    
+    # Handle optional parameters manually to avoid GlueArgumentError
+    optional_params = {
+        'mode': 'full'  # Default mode - removed input_path
+    }
+    
+    # Parse optional parameters from sys.argv
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith('--mode') and i + 1 < len(sys.argv):
+            optional_params['mode'] = sys.argv[i + 1]
+    
+    # Merge required and optional parameters
+    args.update(optional_params)
+    
+    return args
 
 def main():
     """Main function with enhanced parameter handling"""
