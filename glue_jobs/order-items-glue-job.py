@@ -148,7 +148,6 @@ class OrderItemsETL:
             logger.error(f"Error loading reference data: {str(e)}")
             return None, None
 
-
     def validate_and_clean_data(self, df_raw, source_file, orders_ref=None, products_ref=None):
         logger.info("Validating and cleaning data ")
         
@@ -349,7 +348,71 @@ class OrderItemsETL:
             logger.error(f"Error updating Glue catalog: {str(e)}")
             raise
 
+    def run_etl(self, input_path=None):
+        """Updated run_etl method to process all files in folder and move them"""
+        if input_path:
+            file_paths = [input_path]
+        else:
+            file_paths = self.list_files_in_s3_folder(self.raw_path)
+            logger.info(f"Found {len(file_paths)} files to process in {self.raw_path}")
+        
+        if not file_paths:
+            logger.warning("No files found to process.")
+            return {"message": "No input files found."}
+        
+        processed_count = 0
+        failed_count = 0
+        
+        orders_ref, products_ref = self.load_reference_data()
+        
+        for file_path in file_paths:
+            try:
+                logger.info(f"Processing file: {file_path}")
+                
+                df_raw = self.read_raw_data(file_path)
+                
+                if df_raw.rdd.isEmpty():
+                    logger.warning(f"File {file_path} is empty. Moving to rejected.")
+                    self.move_to_rejected(file_path)
+                    failed_count += 1
+                    continue
 
+                df_clean = self.validate_and_clean_data(df_raw, file_path, orders_ref, products_ref)
+                
+                if df_clean.rdd.isEmpty():
+                    logger.warning(f"No valid records in {file_path} after validation. Moving to rejected.")
+                    self.move_to_rejected(file_path)
+                    failed_count += 1
+                    continue
+                    
+                logger.info(f"Processing {df_clean.count()} valid records from {file_path}")
+                
+                self.upsert_to_delta_table(df_clean)
+                
+                if self.move_to_archived(file_path):
+                    processed_count += 1
+                    logger.info(f"Successfully processed and archived: {file_path}")
+                else:
+                    logger.error(f"Failed to move {file_path} to archived")
+                    failed_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error processing file {file_path}: {str(e)}")
+                self.move_to_rejected(file_path)
+                failed_count += 1
+        
+        if processed_count > 0:
+            try:
+                self.update_glue_catalog()
+                logger.info("Glue catalog updated successfully")
+            except Exception as e:
+                logger.error(f"Error updating Glue catalog: {str(e)}")
+        
+        return {
+            "message": f"ETL completed. Processed: {processed_count}, Failed: {failed_count}",
+            "processed_files": processed_count,
+            "failed_files": failed_count
+        }
 
 def main():
     args = getResolvedOptions(sys.argv, [
