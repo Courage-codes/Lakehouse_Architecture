@@ -276,6 +276,38 @@ class OrderItemsETL:
         except Exception as e:
             logger.error(f"Error quarantining invalid records: {str(e)}")
 
+    def upsert_to_delta_table(self, df):
+        window_spec = Window.partitionBy("id").orderBy(col("ingestion_timestamp").desc())
+        df = df.withColumn("row_num", row_number().over(window_spec)).filter(col("row_num") == 1).drop("row_num")
+        if DeltaTable.isDeltaTable(self.spark, self.processed_path):
+            delta_table = DeltaTable.forPath(self.spark, self.processed_path)
+            delta_table.alias("target").merge(
+                df.alias("source"),
+                "target.id = source.id"
+            ).whenMatchedUpdateAll(
+                condition="source.ingestion_timestamp > target.ingestion_timestamp"
+            ).whenNotMatchedInsertAll().execute()
+        else:
+            df.repartition("date").write.format("delta") \
+              .mode("overwrite") \
+              .partitionBy("date") \
+              .option("mergeSchema", "true") \
+              .option("delta.autoOptimize.optimizeWrite", "true") \
+              .option("delta.autoOptimize.autoCompact", "true") \
+              .save(self.processed_path)
+        self.optimize_delta_table(df)
+
+    def optimize_delta_table(self, df):
+        if DeltaTable.isDeltaTable(self.spark, self.processed_path):
+            delta_table = DeltaTable.forPath(self.spark, self.processed_path)
+            partitions = df.select("date").distinct().collect()
+            for row in partitions:
+                logger.info(f"Optimizing partition: date='{row['date']}'")
+                delta_table.optimize().where(f"date = '{row['date']}'").executeZOrderBy("order_id", "user_id", "product_id")
+            logger.info("Running VACUUM on the delta table.")
+            delta_table.vacuum()
+
+
 
 def main():
     args = getResolvedOptions(sys.argv, [
