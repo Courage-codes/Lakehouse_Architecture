@@ -307,6 +307,48 @@ class OrderItemsETL:
             logger.info("Running VACUUM on the delta table.")
             delta_table.vacuum()
 
+    def create_database_if_not_exists(self):
+        """Create database if it doesn't exist"""
+        try:
+            self.spark.sql(f"CREATE DATABASE IF NOT EXISTS {self.database_name}")
+            logger.info(f"Ensured database {self.database_name} exists")
+        except Exception as e:
+            logger.error(f"Error creating database with Spark SQL: {str(e)}")
+            try:
+                glue_client = boto3.client('glue')
+                try:
+                    glue_client.get_database(Name=self.database_name)
+                    logger.info(f"Database {self.database_name} already exists")
+                except glue_client.exceptions.EntityNotFoundException:
+                    logger.info(f"Creating database {self.database_name}")
+                    glue_client.create_database(
+                        DatabaseInput={
+                            'Name': self.database_name,
+                            'Description': f'Database for {self.database_name} data lake'
+                        }
+                    )
+                    logger.info(f"Successfully created database {self.database_name}")
+            except Exception as fallback_error:
+                logger.error(f"Error creating database with Glue API: {str(fallback_error)}")
+                raise
+    
+    def update_glue_catalog(self):
+        self.create_database_if_not_exists()
+        
+        try:
+            self.spark.sql(f"""
+                CREATE TABLE IF NOT EXISTS {self.database_name}.{self.table_name}
+                USING DELTA
+                LOCATION '{self.processed_path}'
+            """)
+            logger.info(f"Created/updated table {self.database_name}.{self.table_name}")
+            
+            logger.info(f"Table {self.database_name}.{self.table_name} metadata is automatically managed by Delta Lake")
+            
+        except Exception as e:
+            logger.error(f"Error updating Glue catalog: {str(e)}")
+            raise
+
 
 
 def main():
