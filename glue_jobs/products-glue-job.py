@@ -145,6 +145,67 @@ class ProductsETL:
             logger.error(f"Error listing raw files: {str(e)}")
             return []
 
+    def validate_and_clean_data(self, df_raw, source_file):
+        """Comprehensive data validation and cleaning"""
+        logger.info("Starting data validation and cleaning")
+        
+        # Add metadata columns
+        df_with_metadata = df_raw.withColumn("ingestion_timestamp", current_timestamp()) \
+            .withColumn("source_file", lit(source_file))
+        
+        # Data quality checks
+        valid_records = df_with_metadata.filter(
+            # Primary key validation
+            (col("product_id").isNotNull()) &
+            (col("product_id") != "") &
+            (length(trim(col("product_id"))) > 0) &
+            
+            # Department validation
+            (col("department_id").isNotNull()) &
+            (col("department_id") != "") &
+            (col("department").isNotNull()) &
+            (col("department") != "") &
+            
+            # Product name validation
+            (col("product_name").isNotNull()) &
+            (col("product_name") != "") &
+            (length(trim(col("product_name"))) > 0)
+        )
+        
+        # Invalid records for quarantine
+        invalid_records = df_with_metadata.exceptAll(valid_records)
+        
+        # Log validation results
+        total_records = df_with_metadata.count()
+        valid_count = valid_records.count()
+        invalid_count = invalid_records.count()
+        
+        logger.info(f"Data validation completed:")
+        logger.info(f"  Total records: {total_records}")
+        logger.info(f"  Valid records: {valid_count}")
+        logger.info(f"  Invalid records: {invalid_count}")
+        
+        # If all records are invalid, move file to rejected zone
+        if valid_count == 0 and total_records > 0:
+            logger.warning(f"All records in {source_file} are invalid, moving to rejected zone")
+            self.move_files_to_rejected([source_file], "all_records_invalid")
+            raise ValueError(f"All records in {source_file} failed validation")
+        
+        # Quarantine invalid records if any
+        if invalid_count > 0:
+            self.quarantine_invalid_records(invalid_records, source_file)
+        
+        # Apply data cleansing
+        cleaned_df = valid_records.select(
+            trim(upper(col("product_id"))).alias("product_id"),
+            trim(col("department_id")).alias("department_id"),
+            trim(col("department")).alias("department"),
+            trim(col("product_name")).alias("product_name"),
+            col("ingestion_timestamp"),
+            col("source_file")
+        )
+        
+        return cleaned_df
 
 def main():
     """Main function to run the Glue job"""
