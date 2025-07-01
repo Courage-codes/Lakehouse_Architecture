@@ -50,6 +50,79 @@ class OrderItemsETL:
 
         self.s3_client = boto3.client('s3')
 
+    def read_raw_data(self, file_path):
+        try:
+            logger.info(f"Reading raw data from: {file_path}")
+            df_raw = self.spark.read.format("csv") \
+                .option("header", "true") \
+                .load(file_path)
+            logger.info(f"CSV columns: {df_raw.columns}")
+            df_raw.show(3, False)
+            return df_raw
+        except Exception as e:
+            logger.error(f"Error reading raw data: {str(e)}")
+            raise
+
+    def list_files_in_s3_folder(self, s3_path):
+        """List all files in S3 folder"""
+        try:
+            parsed_url = urlparse(s3_path)
+            bucket = parsed_url.netloc
+            prefix = parsed_url.path.lstrip('/')
+            
+            response = self.s3_client.list_objects_v2(
+                Bucket=bucket,
+                Prefix=prefix
+            )
+            
+            files = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    if not obj['Key'].endswith('/'):
+                        files.append(f"s3://{bucket}/{obj['Key']}")
+            
+            return files
+        except Exception as e:
+            logger.error(f"Error listing files in {s3_path}: {str(e)}")
+            return []
+
+    def move_s3_file(self, source_s3_path, destination_s3_path):
+        """Move file from source to destination in S3"""
+        try:
+            source_parsed = urlparse(source_s3_path)
+            dest_parsed = urlparse(destination_s3_path)
+            
+            source_bucket = source_parsed.netloc
+            source_key = source_parsed.path.lstrip('/')
+            dest_bucket = dest_parsed.netloc
+            dest_key = dest_parsed.path.lstrip('/')
+            
+            self.s3_client.copy_object(
+                Bucket=dest_bucket,
+                CopySource={'Bucket': source_bucket, 'Key': source_key},
+                Key=dest_key
+            )
+            
+            self.s3_client.delete_object(Bucket=source_bucket, Key=source_key)
+            logger.info(f"Moved {source_s3_path} to {destination_s3_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error moving file {source_s3_path}: {str(e)}")
+            return False
+
+    def move_to_archived(self, source_file_path):
+        """Move processed file to archived zone"""
+        try:
+            filename = os.path.basename(urlparse(source_file_path).path)
+            archived_file_path = f"{self.archived_path}{filename}"
+            
+            return self.move_s3_file(source_file_path, archived_file_path)
+            
+        except Exception as e:
+            logger.error(f"Error moving to archived: {str(e)}")
+            return False
+
 
 def main():
     args = getResolvedOptions(sys.argv, [
