@@ -480,6 +480,85 @@ class OrdersETL:
             logger.error(f"Error optimizing Delta table: {str(e)}")
             self.publish_metric("OptimizationErrors", 1)
 
+    def update_glue_catalog(self):
+        """Update AWS Glue Data Catalog with error handling"""
+        try:
+            logger.info("Updating Glue Data Catalog")
+            
+            # Create database if not exists
+            self.spark.sql(f"CREATE DATABASE IF NOT EXISTS {self.database_name}")
+            
+            # Check if table already exists in catalog
+            table_exists_in_catalog = False
+            try:
+                self.spark.sql(f"DESCRIBE TABLE {self.database_name}.{self.table_name}")
+                table_exists_in_catalog = True
+                logger.info(f"Table {self.database_name}.{self.table_name} already exists in catalog")
+            except Exception:
+                logger.info(f"Table {self.database_name}.{self.table_name} does not exist in catalog, will create")
+            
+            if not table_exists_in_catalog:
+                # Method 1: Create table with explicit schema matching existing Delta properties
+                self.spark.sql(f"""
+                    CREATE TABLE {self.database_name}.{self.table_name} (
+                        order_num BIGINT,
+                        order_id STRING,
+                        user_id STRING,
+                        order_timestamp TIMESTAMP,
+                        total_amount DECIMAL(10,2),
+                        ingestion_timestamp TIMESTAMP,
+                        source_file STRING,
+                        date DATE
+                    )
+                    USING DELTA
+                    LOCATION '{self.processed_path}'
+                    PARTITIONED BY (date)
+                    TBLPROPERTIES (
+                        'delta.autoOptimize.optimizeWrite' = 'true',
+                        'delta.autoOptimize.autoCompact' = 'true',
+                        'delta.deletedFileRetentionDuration' = 'interval 7 days'
+                    )
+                """)
+            else:
+                # Table exists, just refresh metadata
+                logger.info("Table exists in catalog, refreshing metadata only")
+            
+            # Alternative Method 2: Let Delta infer schema first, then add partitioning
+            # Uncomment this block if Method 1 doesn't work
+            """
+            # First create table without partitioning to let Delta infer schema
+            self.spark.sql(f'''
+                CREATE TABLE IF NOT EXISTS {self.database_name}.{self.table_name}
+                USING DELTA
+                LOCATION '{self.processed_path}'
+                TBLPROPERTIES (
+                    'delta.autoOptimize.optimizeWrite' = 'true',
+                    'delta.autoOptimize.autoCompact' = 'true'
+                )
+            ''')
+            
+            # Then add partitioning (this might require recreating the table)
+            try:
+                self.spark.sql(f"ALTER TABLE {self.database_name}.{self.table_name} ADD PARTITION (date)")
+            except Exception as partition_error:
+                logger.warning(f"Could not add partition specification: {str(partition_error)}")
+            """
+            
+            # Repair table to discover partitions
+            self.spark.sql(f"MSCK REPAIR TABLE {self.database_name}.{self.table_name}")
+            
+            # Refresh table metadata
+            self.spark.sql(f"REFRESH TABLE {self.database_name}.{self.table_name}")
+            
+            logger.info("Glue Data Catalog updated successfully")
+            self.publish_metric("CatalogUpdateSuccess", 1)
+            
+        except Exception as e:
+            logger.error(f"Error updating Glue Data Catalog: {str(e)}")
+            self.publish_metric("CatalogUpdateErrors", 1)
+            # Don't raise the exception - let the job continue even if catalog update fails
+            logger.warning("Continuing job execution despite catalog update failure")
+    
 
 def main():
     """Main function with enhanced parameter handling"""
