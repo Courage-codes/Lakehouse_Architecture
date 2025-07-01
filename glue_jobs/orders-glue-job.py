@@ -96,6 +96,132 @@ class OrdersETL:
             self.publish_metric("ReadErrors", 1)
             raise
 
+    def validate_and_clean_data(self, df_raw, source_file):
+        """Comprehensive data validation and cleaning with improved error handling"""
+        logger.info("Starting data validation and cleaning")
+        
+        # Add metadata columns
+        df_with_metadata = df_raw.withColumn("ingestion_timestamp", current_timestamp()) \
+            .withColumn("source_file", lit(source_file.split('/')[-1] if '/' in source_file else source_file))
+        
+        # Enhanced data type conversions with validation
+        df_typed = df_with_metadata.withColumn(
+            "order_num_clean", 
+            when(col("order_num").rlike("^[0-9]+$"), col("order_num").cast(LongType()))
+            .otherwise(None)
+        ).withColumn(
+            "total_amount_clean",
+            when(col("total_amount").rlike("^[0-9]+\\.?[0-9]*$"), 
+                 col("total_amount").cast(DecimalType(10,2)))
+            .otherwise(None)
+        ).withColumn(
+            "order_timestamp_clean",
+            coalesce(
+                to_timestamp(col("order_timestamp"), "yyyy-MM-dd HH:mm:ss"),
+                to_timestamp(col("order_timestamp"), "yyyy-MM-dd'T'HH:mm:ss"),
+                to_timestamp(col("order_timestamp"), "MM/dd/yyyy HH:mm:ss")
+            )
+        ).withColumn(
+            "date_clean",
+            coalesce(
+                to_date(col("date"), "yyyy-MM-dd"),
+                to_date(col("date"), "MM/dd/yyyy"),
+                to_date(col("date"), "dd/MM/yyyy")
+            )
+        )
+        
+        # FIXED: Break down complex validation into separate steps to avoid Py4JError
+        
+        # Step 1: Basic null and corruption checks
+        step1_filter = df_typed.filter(
+            (col("_corrupt_record").isNull()) &
+            (col("order_num_clean").isNotNull()) &
+            (col("order_num_clean") > 0)
+        )
+        
+        # Step 2: Order ID validation
+        step2_filter = step1_filter.filter(
+            (col("order_id").isNotNull()) &
+            (length(trim(col("order_id"))) >= 3) &
+            (length(trim(col("order_id"))) <= 50) &
+            (col("order_id").rlike("^[A-Za-z0-9_-]+$"))
+        )
+        
+        # Step 3: User ID validation
+        step3_filter = step2_filter.filter(
+            (col("user_id").isNotNull()) &
+            (length(trim(col("user_id"))) >= 1) &
+            (length(trim(col("user_id"))) <= 100)
+        )
+        
+        # Step 4: Timestamp validation
+        step4_filter = step3_filter.filter(
+            (col("order_timestamp_clean").isNotNull()) &
+            (col("order_timestamp_clean") >= to_timestamp(lit("2020-01-01 00:00:00"))) &
+            (col("order_timestamp_clean") <= current_timestamp())
+        )
+        
+        # Step 5: Amount validation
+        step5_filter = step4_filter.filter(
+            (col("total_amount_clean").isNotNull()) &
+            (col("total_amount_clean") > 0) &
+            (col("total_amount_clean") <= 100000.00)
+        )
+        
+        # Step 6: Date validation
+        valid_records = step5_filter.filter(
+            (col("date_clean").isNotNull()) &
+            (col("date_clean") >= to_date(lit("2020-01-01"))) &
+            (col("date_clean") <= current_date())
+        )
+        
+        # Get invalid records for quarantine using exceptAll
+        try:
+            invalid_records = df_typed.exceptAll(valid_records)
+        except Exception as e:
+            logger.warning(f"exceptAll failed, using alternative method: {str(e)}")
+            # Alternative method if exceptAll fails
+            valid_order_ids = valid_records.select("order_id").distinct()
+            invalid_records = df_typed.join(valid_order_ids, ["order_id"], "left_anti")
+        
+        # Log validation results and publish metrics
+        total_records = df_typed.count()
+        valid_count = valid_records.count()
+        invalid_count = invalid_records.count()
+        
+        logger.info(f"Data validation completed:")
+        logger.info(f"  Total records: {total_records}")
+        logger.info(f"  Valid records: {valid_count}")
+        logger.info(f"  Invalid records: {invalid_count}")
+        
+        # Publish metrics
+        self.publish_metric("ValidRecords", valid_count)
+        self.publish_metric("InvalidRecords", invalid_count)
+        self.publish_metric("ValidationSuccessRate", (valid_count / total_records * 100) if total_records > 0 else 0)
+        
+        # Quarantine invalid records if any
+        if invalid_count > 0:
+            self.quarantine_invalid_records(invalid_records, source_file)
+        
+        # Stop processing if validation-only mode
+        if self.mode == "validate_only":
+            logger.info("Validation-only mode: stopping after validation")
+            return valid_records.limit(0)  # Return empty dataframe
+        
+        # Apply final cleaning and select required columns
+        cleaned_df = valid_records.select(
+            col("order_num_clean").alias("order_num"),
+            trim(upper(col("order_id"))).alias("order_id"),
+            trim(col("user_id")).alias("user_id"),
+            col("order_timestamp_clean").alias("order_timestamp"),
+            col("total_amount_clean").alias("total_amount"),
+            col("date_clean").alias("date"),
+            col("ingestion_timestamp"),
+            col("source_file")
+        )
+        
+        return cleaned_df
+ 
 
 
 def main():
