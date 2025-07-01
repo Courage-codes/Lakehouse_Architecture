@@ -207,6 +207,75 @@ class ProductsETL:
         
         return cleaned_df
 
+    
+    def quarantine_invalid_records(self, invalid_df, source_file):
+        """Save invalid records to quarantine zone"""
+        try:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            quarantine_file_path = f"{self.quarantine_path}{timestamp}_{source_file.split('/')[-1]}"
+            
+            # Add rejection reasons
+            invalid_with_reasons = invalid_df.withColumn(
+                "rejection_reason",
+                when(col("product_id").isNull() | (col("product_id") == ""), "Missing product_id")
+                .when(col("department_id").isNull() | (col("department_id") == ""), "Missing department_id")
+                .when(col("department").isNull() | (col("department") == ""), "Missing department")
+                .when(col("product_name").isNull() | (col("product_name") == ""), "Missing product_name")
+                .otherwise("Multiple validation failures")
+            ).withColumn("quarantine_timestamp", current_timestamp())
+            
+            invalid_with_reasons.coalesce(1).write.mode("overwrite") \
+                .option("header", "true") \
+                .csv(quarantine_file_path)
+            
+            logger.info(f"Invalid records quarantined to: {quarantine_file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error quarantining invalid records: {str(e)}")
+            # Don't fail the job for quarantine errors
+    
+    def upsert_to_delta_table(self, df_cleaned):
+        """Upsert data to Delta table with deduplication"""
+        try:
+            logger.info("Starting Delta table upsert operation")
+            
+            # Deduplicate within the current batch
+            df_deduped = df_cleaned.dropDuplicates(["product_id"])
+            
+            # Check if Delta table exists
+            if DeltaTable.isDeltaTable(self.spark, self.processed_path):
+                logger.info("Delta table exists, performing merge operation")
+                
+                # Load existing Delta table
+                delta_table = DeltaTable.forPath(self.spark, self.processed_path)
+                
+                # Perform merge (upsert) operation
+                delta_table.alias("target").merge(
+                    df_deduped.alias("source"),
+                    "target.product_id = source.product_id"
+                ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+                
+                logger.info("Merge operation completed successfully")
+                
+            else:
+                logger.info("Delta table doesn't exist, creating new table")
+                
+                # Create new Delta table
+                df_deduped.write.format("delta") \
+                    .mode("overwrite") \
+                    .option("mergeSchema", "true") \
+                    .save(self.processed_path)
+                
+                logger.info("New Delta table created successfully")
+            
+            # Optimize Delta table
+            self.optimize_delta_table()
+            
+        except Exception as e:
+            logger.error(f"Error in Delta table upsert: {str(e)}")
+            raise
+    
+
 def main():
     """Main function to run the Glue job"""
     # Get job parameters (removed input_path)
