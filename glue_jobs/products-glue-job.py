@@ -58,6 +58,38 @@ class ProductsETL:
         except Exception as e:
             logger.error(f"Error reading raw data: {str(e)}")
             raise
+    
+    def move_files_to_archive(self, processed_files):
+        """Move successfully processed files from raw zone to archive zone"""
+        try:
+            logger.info("Moving processed files to archive zone")
+            
+            s3_client = boto3.client('s3')
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            
+            for file_path in processed_files:
+                # Extract filename from S3 path
+                filename = file_path.split('/')[-1]
+                
+                # Define source and destination
+                source_key = f"raw-zone/products/{filename}"
+                dest_key = f"archived/products/{timestamp}_{filename}"
+                
+                # Copy file to archive
+                s3_client.copy_object(
+                    Bucket=self.raw_bucket,
+                    CopySource={'Bucket': self.raw_bucket, 'Key': source_key},
+                    Key=dest_key
+                )
+                
+                # Delete from raw zone
+                s3_client.delete_object(Bucket=self.raw_bucket, Key=source_key)
+                
+                logger.info(f"Moved {filename} to archive: {dest_key}")
+                
+        except Exception as e:
+            logger.error(f"Error moving files to archive: {str(e)}")
+            # Don't fail the job for archiving errors
 
 
 
