@@ -251,6 +251,119 @@ class OrdersETL:
             logger.error(f"Error listing raw files: {str(e)}")
             return []
 
+        def move_file_to_archive(self, file_path):
+            """Move processed file from raw zone to archive zone"""
+            try:
+                # Extract bucket and key from S3 path
+                source_parts = file_path.replace('s3://', '').split('/', 1)
+                bucket_name = source_parts[0]
+                source_key = source_parts[1]
+                
+                # Create archive key
+                file_name = source_key.split('/')[-1]
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                archive_key = f"archived/orders/{timestamp}_{file_name}"
+                
+                # Copy file to archive
+                copy_source = {'Bucket': bucket_name, 'Key': source_key}
+                self.s3_client.copy_object(
+                    CopySource=copy_source,
+                    Bucket=bucket_name,
+                    Key=archive_key
+                )
+                
+                # Delete original file
+                self.s3_client.delete_object(Bucket=bucket_name, Key=source_key)
+                
+                logger.info(f"File moved from {file_path} to s3://{bucket_name}/{archive_key}")
+                return f"s3://{bucket_name}/{archive_key}"
+                
+            except Exception as e:
+                logger.error(f"Error moving file to archive: {str(e)}")
+                raise
+    
+    def move_file_to_rejected(self, file_path, error_reason):
+        """Move failed file from raw zone to rejected zone"""
+        try:
+            # Extract bucket and key from S3 path
+            source_parts = file_path.replace('s3://', '').split('/', 1)
+            bucket_name = source_parts[0]
+            source_key = source_parts[1]
+            
+            # Create rejected key with error info
+            file_name = source_key.split('/')[-1]
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            rejected_key = f"rejected/orders/{timestamp}_FAILED_{file_name}"
+            
+            # Copy file to rejected zone
+            copy_source = {'Bucket': bucket_name, 'Key': source_key}
+            self.s3_client.copy_object(
+                CopySource=copy_source,
+                Bucket=bucket_name,
+                Key=rejected_key
+            )
+            
+            # Create error log file
+            error_log_key = f"rejected/orders/{timestamp}_FAILED_{file_name}.error_log"
+            error_content = f"Processing failed at: {datetime.now(timezone.utc)}\nError: {error_reason}\nOriginal file: {file_path}\n"
+            
+            self.s3_client.put_object(
+                Bucket=bucket_name,
+                Key=error_log_key,
+                Body=error_content.encode('utf-8'),
+                ContentType='text/plain'
+            )
+            
+            # Delete original file
+            self.s3_client.delete_object(Bucket=bucket_name, Key=source_key)
+            
+            logger.info(f"File moved from {file_path} to s3://{bucket_name}/{rejected_key}")
+            return f"s3://{bucket_name}/{rejected_key}"
+            
+        except Exception as e:
+            logger.error(f"Error moving file to rejected zone: {str(e)}")
+            raise
+
+    def quarantine_invalid_records(self, invalid_df, source_file):
+        """Save invalid records with detailed rejection reasons"""
+        try:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            file_name = source_file.split('/')[-1] if '/' in source_file else source_file
+            quarantine_file_path = f"{self.quarantine_path}{timestamp}_{file_name}"
+            
+            # Add comprehensive rejection reasons
+            invalid_with_reasons = invalid_df.withColumn(
+                "rejection_reason",
+                when(col("_corrupt_record").isNotNull(), "Corrupt record format")
+                .when(col("order_num").isNull() | ~col("order_num").rlike("^[0-9]+$"), 
+                     "Invalid or missing order_num")
+                .when(col("order_id").isNull() | (length(trim(col("order_id"))) < 3), 
+                      "Invalid or missing order_id")
+                .when(col("user_id").isNull() | (length(trim(col("user_id"))) == 0), 
+                      "Missing user_id")
+                .when(col("order_timestamp_clean").isNull(), 
+                      "Invalid order_timestamp format")
+                .when(col("total_amount_clean").isNull() | (col("total_amount_clean") <= 0), 
+                      "Invalid total_amount")
+                .when(col("date_clean").isNull(), 
+                      "Invalid date format")
+                .when(col("total_amount_clean") > 100000.00, 
+                      "Amount exceeds maximum limit")
+                .otherwise("Multiple validation failures")
+            ).withColumn("quarantine_timestamp", current_timestamp()) \
+             .withColumn("job_name", lit(self.job_name))
+            
+            # Write to quarantine with single file
+            invalid_with_reasons.coalesce(1).write.mode("overwrite") \
+                .option("header", "true") \
+                .csv(quarantine_file_path)
+            
+            logger.info(f"Invalid records quarantined to: {quarantine_file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error quarantining invalid records: {str(e)}")
+            self.publish_metric("QuarantineErrors", 1)
+
 
 
 def main():
