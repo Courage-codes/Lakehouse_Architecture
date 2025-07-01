@@ -91,7 +91,6 @@ class ProductsETL:
             logger.error(f"Error moving files to archive: {str(e)}")
             # Don't fail the job for archiving errors
 
-
     def move_files_to_rejected(self, failed_files, error_reason):
         """Move failed files from raw zone to rejected zone"""
         try:
@@ -206,7 +205,6 @@ class ProductsETL:
         )
         
         return cleaned_df
-
     
     def quarantine_invalid_records(self, invalid_df, source_file):
         """Save invalid records to quarantine zone"""
@@ -274,6 +272,7 @@ class ProductsETL:
         except Exception as e:
             logger.error(f"Error in Delta table upsert: {str(e)}")
             raise
+    
     def optimize_delta_table(self):
         """Optimize Delta table for better performance"""
         try:
@@ -294,7 +293,119 @@ class ProductsETL:
         except Exception as e:
             logger.error(f"Error optimizing Delta table: {str(e)}")
             # Don't fail the job for optimization errors
+    
+    def update_glue_catalog(self):
+        """Update AWS Glue Data Catalog"""
+        try:
+            logger.info("Updating Glue Data Catalog")
+            
+            # Create or update table in Glue Catalog
+            self.spark.sql(f"""
+                CREATE TABLE IF NOT EXISTS {self.database_name}.{self.table_name}
+                USING DELTA
+                LOCATION '{self.processed_path}'
+            """)
+            
+            logger.info("Glue Data Catalog updated successfully")
+            
+        except Exception as e:
+            logger.error(f"Error updating Glue Data Catalog: {str(e)}")
+            # Don't fail the job for catalog errors
+    
+    def get_processing_stats(self):
+        """Get processing statistics for monitoring"""
+        try:
+            delta_table = DeltaTable.forPath(self.spark, self.processed_path)
+            total_records = delta_table.toDF().count()
+            
+            # Get last update timestamp
+            last_update = delta_table.toDF().agg(max("ingestion_timestamp")).collect()[0][0]
+            
+            stats = {
+                "total_records": total_records,
+                "last_update": str(last_update),
+                "table_location": self.processed_path
+            }
+            
+            logger.info(f"Processing stats: {stats}")
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error getting processing stats: {str(e)}")
+            return {}
+    
+    def run_etl(self):
+        """Main ETL orchestration method"""
+        processed_files = []
+        failed_files = []
         
+        try:
+            logger.info(f"Starting Products ETL job: {self.job_name}")
+            
+            # Get all files in raw zone
+            raw_files = self.list_raw_files()
+            
+            if not raw_files:
+                logger.info("No CSV files found in raw zone")
+                return {"message": "No files to process"}
+            
+            # Process each file individually
+            all_cleaned_data = []
+            
+            for file_path in raw_files:
+                try:
+                    logger.info(f"Processing file: {file_path}")
+                    
+                    # Read raw data
+                    df_raw = self.read_raw_data(file_path)
+                    
+                    # Validate and clean data
+                    df_cleaned = self.validate_and_clean_data(df_raw, file_path)
+                    
+                    all_cleaned_data.append(df_cleaned)
+                    processed_files.append(file_path)
+                    
+                    logger.info(f"Successfully processed file: {file_path}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to process file {file_path}: {str(e)}")
+                    failed_files.append(file_path)
+                    # Move failed file to rejected zone
+                    self.move_files_to_rejected([file_path], "processing_failed")
+            
+            # If we have successfully processed data, proceed with Delta operations
+            if all_cleaned_data:
+                # Union all cleaned dataframes
+                final_df = all_cleaned_data[0]
+                for df in all_cleaned_data[1:]:
+                    final_df = final_df.union(df)
+                
+                # Upsert to Delta table
+                self.upsert_to_delta_table(final_df)
+                
+                # Update Glue Catalog
+                self.update_glue_catalog()
+                
+                # Move successfully processed files to archive
+                if processed_files:
+                    self.move_files_to_archive(processed_files)
+            
+            # Get final stats
+            stats = self.get_processing_stats()
+            stats.update({
+                "processed_files": len(processed_files),
+                "failed_files": len(failed_files)
+            })
+            
+            logger.info("Products ETL job completed successfully")
+            return stats
+            
+        except Exception as e:
+            logger.error(f"ETL job failed: {str(e)}")
+            # Move any remaining files to rejected zone
+            if failed_files:
+                self.move_files_to_rejected(failed_files, "etl_job_failed")
+            raise
 
 def main():
     """Main function to run the Glue job"""
