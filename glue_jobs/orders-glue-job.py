@@ -221,7 +221,36 @@ class OrdersETL:
         )
         
         return cleaned_df
- 
+        
+    def list_raw_files(self):
+        """List all CSV files in the raw zone"""
+        try:
+            logger.info(f"Listing files in raw zone: {self.raw_path}")
+            
+            # Extract bucket and prefix from S3 path
+            bucket_parts = self.raw_path.replace('s3://', '').split('/', 1)
+            bucket_name = bucket_parts[0]
+            prefix = bucket_parts[1] if len(bucket_parts) > 1 else ""
+            
+            response = self.s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=prefix
+            )
+            
+            files = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    # Only include CSV files and exclude directory markers
+                    if obj['Key'].endswith('.csv') and obj['Size'] > 0:
+                        files.append(f"s3://{bucket_name}/{obj['Key']}")
+            
+            logger.info(f"Found {len(files)} CSV files to process")
+            return files
+            
+        except Exception as e:
+            logger.error(f"Error listing raw files: {str(e)}")
+            return []
+
 
 
 def main():
