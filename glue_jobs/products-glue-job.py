@@ -92,6 +92,59 @@ class ProductsETL:
             # Don't fail the job for archiving errors
 
 
+    def move_files_to_rejected(self, failed_files, error_reason):
+        """Move failed files from raw zone to rejected zone"""
+        try:
+            logger.info("Moving failed files to rejected zone")
+            
+            s3_client = boto3.client('s3')
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            
+            for file_path in failed_files:
+                # Extract filename from S3 path
+                filename = file_path.split('/')[-1]
+                
+                # Define source and destination
+                source_key = f"raw-zone/products/{filename}"
+                dest_key = f"rejected/products/{timestamp}_{error_reason}_{filename}"
+                
+                # Copy file to rejected
+                s3_client.copy_object(
+                    Bucket=self.raw_bucket,
+                    CopySource={'Bucket': self.raw_bucket, 'Key': source_key},
+                    Key=dest_key
+                )
+                
+                # Delete from raw zone
+                s3_client.delete_object(Bucket=self.raw_bucket, Key=source_key)
+                
+                logger.info(f"Moved {filename} to rejected: {dest_key}")
+                
+        except Exception as e:
+            logger.error(f"Error moving files to rejected: {str(e)}")
+
+    def list_raw_files(self):
+        """List all CSV files in the raw zone"""
+        try:
+            s3_client = boto3.client('s3')
+            response = s3_client.list_objects_v2(
+                Bucket=self.raw_bucket,
+                Prefix='raw-zone/products/'
+            )
+            
+            files = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    if obj['Key'].endswith('.csv'):
+                        files.append(f"s3://{self.raw_bucket}/{obj['Key']}")
+            
+            logger.info(f"Found {len(files)} CSV files in raw zone")
+            return files
+            
+        except Exception as e:
+            logger.error(f"Error listing raw files: {str(e)}")
+            return []
+
 
 def main():
     """Main function to run the Glue job"""
