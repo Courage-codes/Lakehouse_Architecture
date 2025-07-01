@@ -149,6 +149,134 @@ class OrderItemsETL:
             return None, None
 
 
+    def validate_and_clean_data(self, df_raw, source_file, orders_ref=None, products_ref=None):
+        logger.info("Validating and cleaning data ")
+        
+        df = df_raw.withColumn("ingestion_timestamp", current_timestamp()) \
+                .withColumn("source_file", lit(source_file))
+        
+        try:
+            df = df.withColumn("days_since_prior_order_int", 
+                            when(col("days_since_prior_order").rlike("^[0-9]+$"), 
+                                col("days_since_prior_order").cast("int")))
+            
+            df = df.withColumn("add_to_cart_order_int", 
+                            when(col("add_to_cart_order").rlike("^[0-9]+$"), 
+                                col("add_to_cart_order").cast("int")))
+            
+            df = df.withColumn("reordered_bool", 
+                            when(lower(col("reordered")).isin("true", "1", "yes"), lit(True))
+                            .when(lower(col("reordered")).isin("false", "0", "no"), lit(False)))
+            
+            df = df.withColumn("order_timestamp_ts", 
+                            coalesce(
+                                to_timestamp("order_timestamp", "yyyy-MM-dd'T'HH:mm:ss"),
+                                to_timestamp("order_timestamp", "yyyy-MM-dd'T'HH:mm"),
+                                to_timestamp("order_timestamp", "yyyy-MM-dd HH:mm:ss"),
+                                to_timestamp("order_timestamp", "yyyy-MM-dd HH:mm")
+                            ))
+            
+            df = df.withColumn("date_dt", to_date("date", "yyyy-MM-dd"))
+            
+            logger.info("Sample timestamp transformations:")
+            df.select("order_timestamp", "order_timestamp_ts").show(3, False)
+            
+            valid_df = df
+            
+            logger.info("Applying required field filters...")
+            valid_df = valid_df.filter(
+                col("id").isNotNull() & (trim(col("id")) != "") &
+                col("order_id").isNotNull() & (trim(col("order_id")) != "") &
+                col("user_id").isNotNull() & (trim(col("user_id")) != "") &
+                col("product_id").isNotNull() & (trim(col("product_id")) != "")
+            )
+            logger.info(f"After required field validation: {valid_df.count()} records")
+            
+            logger.info("Applying numeric field filters...")
+            valid_df = valid_df.filter(
+                col("add_to_cart_order_int").isNotNull() &
+                (col("add_to_cart_order_int") > 0)
+            )
+            logger.info(f"After numeric validation: {valid_df.count()} records")
+            
+            logger.info("Applying timestamp filters...")
+            logger.info(f"Records with null timestamps: {valid_df.filter(col('order_timestamp_ts').isNull()).count()}")
+            
+            valid_df = valid_df.filter(col("order_timestamp_ts").isNotNull())
+            logger.info(f"After timestamp validation: {valid_df.count()} records")
+            
+            start_date = lit("2020-01-01").cast("date")
+            today = current_date()
+            
+            logger.info(f"Records with null dates: {valid_df.filter(col('date_dt').isNull()).count()}")
+            
+            valid_df = valid_df.filter(
+                col("date_dt").isNotNull() &
+                (col("date_dt") >= start_date) &
+                (col("date_dt") <= today)
+            )
+            logger.info(f"After date validation: {valid_df.count()} records")
+            
+            logger.info("Applying days_since_prior_order filters...")
+            valid_df = valid_df.filter(
+                col("days_since_prior_order_int").isNull() |
+                (col("days_since_prior_order_int") >= 0) & (col("days_since_prior_order_int") <= 365)
+            )
+            logger.info(f"After days_since_prior_order validation: {valid_df.count()} records")
+            
+            if orders_ref is not None and orders_ref.count() > 0:
+                valid_df = valid_df.join(orders_ref, ["order_id", "user_id"], "inner")
+                logger.info(f"Records after order validation: {valid_df.count()}")
+            else:
+                logger.warning("Skipping order validation - no reference data or empty table.")
+                
+            if products_ref is not None and products_ref.count() > 0:
+                valid_df = valid_df.join(products_ref, ["product_id"], "inner")
+                logger.info(f"Records after product validation: {valid_df.count()}")
+            else:
+                logger.warning("Skipping product validation - no reference data or empty table.")
+
+            invalid_df = df.join(valid_df.select(*df.columns), df.columns, "left_anti")
+            if not invalid_df.rdd.isEmpty():
+                self.quarantine_invalid_records(invalid_df, source_file)
+
+            return valid_df.select(
+                trim(upper(col("id"))).alias("id"),
+                trim(upper(col("order_id"))).alias("order_id"),
+                trim(col("user_id")).alias("user_id"),
+                col("days_since_prior_order_int").alias("days_since_prior_order"),
+                trim(upper(col("product_id"))).alias("product_id"),
+                col("add_to_cart_order_int").alias("add_to_cart_order"),
+                col("reordered_bool").alias("reordered"),
+                col("order_timestamp_ts").alias("order_timestamp"),
+                col("date_dt").alias("date"),
+                col("ingestion_timestamp"),
+                col("source_file")
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in defensive validation: {str(e)}")
+            raise
+
+    def quarantine_invalid_records(self, df, source_file):
+        """Updated to not duplicate rejected files"""
+        try:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            file_name = os.path.basename(urlparse(source_file).path) if source_file else "unknown"
+            path = f"{self.quarantine_path}validation_failures_{timestamp}_{file_name}"
+            
+            df.withColumn("quarantine_timestamp", current_timestamp()) \
+              .withColumn("quarantine_reason", lit("validation_failure")) \
+              .write.mode("overwrite") \
+              .option("header", "true") \
+              .csv(path)
+            
+            logger.info(f"Invalid records quarantined to: {path}")
+            
+        except Exception as e:
+            logger.error(f"Error quarantining invalid records: {str(e)}")
+
+
 def main():
     args = getResolvedOptions(sys.argv, [
         'JOB_NAME',
