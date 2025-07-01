@@ -1,0 +1,141 @@
+{
+  "Comment": "ETL pipeline with Glue job and SNS notifications",
+  "StartAt": "ExtractDatasetFromEvent",
+  "States": {
+    "ExtractDatasetFromEvent": {
+      "Type": "Pass",
+      "Parameters": {
+        "dataset.$": "States.ArrayGetItem($.processed_subfolders, 0)",
+        "bucket.$": "$.bucket_name",
+        "key.$": "$.original_s3_event.Records[0].s3.object.key"
+      },
+      "ResultPath": "$.extracted",
+      "Next": "WaitForS3Consistency"
+    },
+    "WaitForS3Consistency": {
+      "Type": "Wait",
+      "Seconds": 5,
+      "Comment": "Brief wait to ensure S3 object is fully available",
+      "Next": "StartGlueJob"
+    },
+    "StartGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName.$": "States.Format('{}-glue-job.py', $.extracted.dataset)",
+        "Arguments": {
+          "--bucket.$": "$.extracted.bucket",
+          "--key.$": "$.extracted.key"
+        }
+      },
+      "TimeoutSeconds": 3600,
+      "ResultPath": "$.glueJobResult",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.glueError",
+          "Next": "NotifyGlueJobFailure"
+        }
+      ],
+      "Next": "WaitForGlueOutput"
+    },
+    "WaitForGlueOutput": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Comment": "Wait for Glue job outputs to be fully written and catalog updated",
+      "Next": "PrepareAnalyticsParams"
+    },
+    "NotifyGlueJobFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:814724283777:ecommerce-etl-alerts",
+        "Subject": "ETL Glue Job Failure",
+        "Message.$": "States.Format('Glue job failed: {}-glue-job.py for dataset: {}. Error: {}. Check CloudWatch logs for details.', $.extracted.dataset, $.extracted.dataset, $.glueError.Cause)"
+      },
+      "Next": "ETLFailure"
+    },
+    "PrepareAnalyticsParams": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "string-replace-function",
+        "Payload": {
+          "input.$": "$.extracted.dataset",
+          "find": "-",
+          "replace": "_"
+        }
+      },
+      "ResultSelector": {
+        "table_name.$": "$.Payload.result",
+        "dataset.$": "$.Payload.original_input"
+      },
+      "ResultPath": "$.analyticsParams",
+      "Next": "PrepareAnalyticsQuery"
+    },
+    "PrepareAnalyticsQuery": {
+      "Type": "Pass",
+      "Parameters": {
+        "query_string.$": "States.Format('SELECT * FROM {} LIMIT 10', $.analyticsParams.table_name)"
+      },
+      "ResultPath": "$.analyticsQuery",
+      "Next": "RunAnalytics"
+    },
+    "RunAnalytics": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Parameters": {
+        "QueryString.$": "$.analyticsQuery.query_string",
+        "QueryExecutionContext": {
+          "Database": "ecommerce_lakehouse"
+        },
+        "ResultConfiguration": {
+          "OutputLocation": "s3://athena-results--bucket/"
+        }
+      },
+      "ResultPath": "$.analyticsResult",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyAnalyticsFailure"
+        }
+      ],
+      "Next": "NotifySuccess"
+    },
+    "NotifyAnalyticsFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:814724283777:ecommerce-etl-alerts",
+        "Subject": "ETL Analytics Failure Alert",
+        "Message.$": "States.Format('Analytics queries failed for dataset: {}. ETL completed successfully but analytics could not be generated. Check Athena console for details.', $.analyticsParams.dataset)"
+      },
+      "Next": "ETLCompleteWithAnalyticsWarning"
+    },
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:814724283777:ecommerce-etl-alerts",
+        "Subject": "ETL Success",
+        "Message.$": "States.Format('ETL and analytics succeeded for dataset: {}.', $.analyticsParams.dataset)"
+      },
+      "Next": "ETLComplete"
+    },
+    "ETLCompleteWithAnalyticsWarning": {
+      "Type": "Succeed"
+    },
+    "ETLComplete": {
+      "Type": "Succeed"
+    },
+    "ETLFailure": {
+      "Type": "Fail",
+      "Cause": "Glue job execution failed"
+    }
+  }
+}
