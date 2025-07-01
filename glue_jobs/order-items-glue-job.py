@@ -123,6 +123,31 @@ class OrderItemsETL:
             logger.error(f"Error moving to archived: {str(e)}")
             return False
 
+    def move_to_rejected(self, source_file_path):
+        """Move failed file to rejected zone"""
+        try:
+            filename = os.path.basename(urlparse(source_file_path).path)
+            rejected_file_path = f"{self.quarantine_path}{filename}"
+            
+            return self.move_s3_file(source_file_path, rejected_file_path)
+            
+        except Exception as e:
+            logger.error(f"Error moving to rejected: {str(e)}")
+            return False
+
+    def load_reference_data(self):
+        try:
+            logger.info("Loading reference data")
+            orders_df = products_df = None
+            if DeltaTable.isDeltaTable(self.spark, self.orders_path):
+                orders_df = DeltaTable.forPath(self.spark, self.orders_path).toDF().select("order_id", "user_id").distinct()
+            if DeltaTable.isDeltaTable(self.spark, self.products_path):
+                products_df = DeltaTable.forPath(self.spark, self.products_path).toDF().select("product_id").distinct()
+            return orders_df, products_df
+        except Exception as e:
+            logger.error(f"Error loading reference data: {str(e)}")
+            return None, None
+
 
 def main():
     args = getResolvedOptions(sys.argv, [
