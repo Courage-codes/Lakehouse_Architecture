@@ -349,7 +349,7 @@ class OrderItemsETL:
             raise
 
     def run_etl(self, input_path=None):
-        """Updated run_etl method to process all files in folder and move them"""
+        """run_etl method to process all files in folder and move them"""
         if input_path:
             file_paths = [input_path]
         else:
