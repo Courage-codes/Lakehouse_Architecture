@@ -3,7 +3,7 @@
 ## Overview
 
 The Lakehouse_Architecture project delivers a robust Lakehouse solution for e-commerce transaction processing, leveraging AWS Glue, Lambda, Step Functions, and Delta Lake. It ensures efficient data ingestion, rigorous validation, and real-time analytics for `order_items`, `orders`, and `products`, embodying a scalable framework for data-driven commerce.
-
+![Architecture Diagram](./images/architecture3.svg)
 ## Directory Structure
 
 - `Data/`: Stores raw data files (`order_items`, `orders`, `products`).
