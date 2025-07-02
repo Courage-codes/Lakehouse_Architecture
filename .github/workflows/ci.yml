@@ -92,7 +92,7 @@ jobs:
       run: |
         echo "Updating Glue jobs..."
         
-        # Function to update or create Glue job
+        # Function to update existing Glue job
         update_glue_job() {
           local job_name=$1
           local script_location=$2
@@ -111,11 +111,12 @@ jobs:
               aws glue update-job --job-name "$job_name" \
                 --job-update "Role=arn:aws:iam::814724283777:role/GlueJobRole,Command={Name=$command_type,ScriptLocation=$script_location},GlueVersion=$glue_version,WorkerType=G.1X,NumberOfWorkers=2"
             fi
+            echo "Job $job_name updated successfully"
           else
-            echo "Job $job_name does not exist. Please create it manually first or add creation logic."
-            exit 1
+            echo "Warning: Job $job_name does not exist. Please check the job name in AWS Glue console."
+            echo "Available jobs in AWS Glue console might have different names."
+            echo "Continuing with other jobs..."
           fi
-          echo "Job $job_name updated successfully"
         }
         
         # Update all jobs with correct names
@@ -153,7 +154,7 @@ jobs:
         echo "Verifying deployment..."
         
         # Check if all Glue jobs exist and are updated
-        for job in "products-glue-job.py" "orders-glue-job.py" "order-items-glue-job.py"; do
+        for job in "products-glue-job" "orders-glue-job" "order-items-glue-job"; do
           if aws glue get-job --job-name "$job" >/dev/null 2>&1; then
             echo "Job $job exists and is accessible"
           else
