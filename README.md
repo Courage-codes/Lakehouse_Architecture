@@ -91,7 +91,7 @@ The Lakehouse_Architecture project delivers a robust Lakehouse solution for e-co
 
 ## GitHub Actions
 
-The project employs GitHub Actions for CI/CD to automate testing and deployment. It includes a workflow that triggers on pushes and pull requests to the `main` branch. The process involves running PySpark integration tests on a compatible environment, followed by deploying Glue scripts to AWS S3, but only if tests pass and on direct pushes to `main`. AWS credentials and configuration secrets are required for deployment.
+The project employs GitHub Actions for CI/CD to automate testing and deployment. It includes a workflow that triggers on pushes and merges to the `main` branch. The process involves running PySpark integration tests on a compatible environment, followed by deploying Glue scripts to AWS S3, but only if tests pass and on direct pushes to `main`. AWS credentials and configuration secrets are required for deployment.
 
 ## Contributing
 
