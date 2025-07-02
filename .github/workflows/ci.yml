@@ -85,7 +85,6 @@ jobs:
         aws s3 cp glue_jobs/products-glue-job.py s3://aws-glue-assets-814724283777-us-east-1/scripts/products-glue-job.py
         aws s3 cp glue_jobs/orders-glue-job.py s3://aws-glue-assets-814724283777-us-east-1/scripts/orders-glue-job.py
         aws s3 cp glue_jobs/order-items-glue-job.py s3://aws-glue-assets-814724283777-us-east-1/scripts/order-items-glue-job.py
-        aws s3 cp glue_jobs/xlsx_to_csv.py s3://aws-glue-assets-814724283777-us-east-1/scripts/xlsx_to_csv.py
         echo "All scripts uploaded successfully"
         
     # Step 5: Update Glue jobs with error handling
@@ -123,7 +122,6 @@ jobs:
         update_glue_job "products-glue-job" "s3://aws-glue-assets-814724283777-us-east-1/scripts/products-glue-job.py" "glueetl" "5.0" ""
         update_glue_job "orders-glue-job" "s3://aws-glue-assets-814724283777-us-east-1/scripts/orders-glue-job.py" "glueetl" "5.0" ""
         update_glue_job "order-items-glue-job" "s3://aws-glue-assets-814724283777-us-east-1/scripts/order-items-glue-job.py" "glueetl" "5.0" ""
-        update_glue_job "xlsx_to_csv" "s3://aws-glue-assets-814724283777-us-east-1/scripts/xlsx_to_csv.py" "pythonshell" "4.0" "3.9"
         
         echo "All Glue jobs updated successfully"
         
@@ -155,7 +153,7 @@ jobs:
         echo "Verifying deployment..."
         
         # Check if all Glue jobs exist and are updated
-        for job in "products-glue-job" "orders-glue-job" "order-items-glue-job" "xlsx_to_csv"; do
+        for job in "products-glue-job" "orders-glue-job" "order-items-glue-job"; do
           if aws glue get-job --job-name "$job" >/dev/null 2>&1; then
             echo "Job $job exists and is accessible"
           else
