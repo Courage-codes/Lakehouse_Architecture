@@ -1,0 +1,21 @@
+# Testing framework
+pytest>=7.0.0
+
+# AWS SDK for Python (if your Glue jobs use boto3)
+boto3>=1.26.0
+botocore>=1.29.0
+
+# Data processing libraries (common for ETL jobs)
+pandas>=1.5.0
+numpy>=1.24.0
+
+# Optional: If you're working with Spark in Glue
+# pyspark>=3.3.0  # Uncomment if needed, but note that Glue provides Spark
+
+# Optional: Other common ETL libraries
+# openpyxl>=3.0.0  # For Excel file handling
+# pyarrow>=10.0.0  # For Parquet files
+# sqlalchemy>=1.4.0  # For database connections
+
+# Code quality (already installed by pipeline but good to have)
+flake8>=6.0.0
