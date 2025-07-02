@@ -18,6 +18,10 @@ The Lakehouse_Architecture project delivers a robust Lakehouse solution for e-co
 - `lambda-string-replace.py`: Lambda function for string manipulation.
 - `lambda-trigger.py`: S3-event-driven Lambda for ETL initiation.
 - `stepfunction.json`: Workflow orchestration configuration.
+- `tests/`: Contains test files:
+  - `__init__.py`: Initialization file for the test package.
+  - `conftest.py`: Configuration for pytest fixtures.
+  - `test_glue_etl.py`: Integration tests for Glue ETL processes with PySpark.
 
 ## Features
 
@@ -77,12 +81,17 @@ The Lakehouse_Architecture project delivers a robust Lakehouse solution for e-co
 
    - Upload sample files to S3 raw zone (e.g., `s3://<bucket>/raw/products/`).
    - Monitor via CloudWatch logs and SNS notifications.
+   - Last tested on: 04:11 AM GMT, Wednesday, July 02, 2025.
 
 ## Usage
 
 - Trigger workflows by uploading files to the S3 raw zone.
 - Step Functions execute Glue jobs, Athena queries, and send SNS updates.
 - Review logs and metrics in CloudWatch.
+
+## GitHub Actions
+
+The project employs GitHub Actions for CI/CD to automate testing and deployment. It includes a workflow that triggers on pushes and pull requests to the `main` branch. The process involves running PySpark integration tests on a compatible environment, followed by deploying Glue scripts to AWS S3, but only if tests pass and on direct pushes to `main`. AWS credentials and configuration secrets are required for deployment.
 
 ## Contributing
 
